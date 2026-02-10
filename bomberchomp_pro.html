@@ -1,0 +1,504 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>High Jumper: Persistent World</title>
+    <style>
+        body {
+            margin: 0;
+            overflow: hidden;
+            background-color: #121212;
+            color: white;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+        }
+        
+        #gameContainer {
+            position: relative;
+            display: flex;
+            gap: 20px;
+        }
+
+        canvas {
+            background-color: #1e1e1e;
+            border: 2px solid #444;
+            box-shadow: 0 0 30px rgba(0,0,0,0.6);
+            display: block;
+        }
+
+        /* UI Overlays */
+        #hud {
+            position: absolute;
+            top: 20px;
+            right: 20px;
+            pointer-events: none;
+            text-align: right;
+            text-shadow: 1px 1px 2px black;
+        }
+
+        #gameOverScreen {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            background: rgba(0, 0, 0, 0.95);
+            padding: 40px;
+            text-align: center;
+            border-radius: 10px;
+            border: 1px solid #00d2ff;
+            box-shadow: 0 0 20px rgba(0, 210, 255, 0.2);
+            display: none;
+            z-index: 10;
+        }
+
+        /* Controls Panel */
+        #controls {
+            background: #2a2a2a;
+            padding: 20px;
+            border-radius: 8px;
+            width: 250px;
+            border: 1px solid #444;
+            display: flex;
+            flex-direction: column;
+            gap: 15px;
+            height: fit-content;
+            max-height: 90vh;
+            overflow-y: auto;
+        }
+
+        .control-group {
+            display: flex;
+            flex-direction: column;
+            gap: 5px;
+        }
+
+        label { font-size: 14px; color: #ccc; display: flex; justify-content: space-between; }
+        span.val-display { color: #00d2ff; font-weight: bold; }
+        
+        input[type=range] {
+            width: 100%;
+            cursor: pointer;
+            accent-color: #00d2ff;
+        }
+
+        button {
+            padding: 10px 20px;
+            font-size: 18px;
+            cursor: pointer;
+            background: #00d2ff;
+            color: #121212;
+            font-weight: bold;
+            border: none;
+            border-radius: 5px;
+            margin-top: 10px;
+            transition: background 0.2s;
+        }
+        button:hover { background: #33e0ff; }
+    </style>
+</head>
+<body>
+
+<div id="gameContainer">
+    
+    <div style="position: relative;">
+        <div id="hud">
+            <h1><span id="scoreDisplay">0</span> m</h1>
+            <p style="font-size: 0.8em; color: #aaa;">Record: <span id="maxDisplay">0</span> m</p>
+            <h2><span id="timeDisplay">60</span> s</h2>
+        </div>
+
+        <div id="gameOverScreen">
+            <h1 id="finalMessage">Time's Up!</h1>
+            <p>You reached: <span id="finalScore">0</span> m</p>
+            <p style="font-size: 0.8em;">Best was: <span id="finalMax">0</span> m</p>
+            <button onclick="resetGame()">Play Again</button>
+        </div>
+
+        <canvas id="gameCanvas"></canvas>
+    </div>
+
+    <div id="controls">
+        <h3>Settings</h3>
+        
+        <div class="control-group">
+            <label>Jump Power <span id="valJump" class="val-display">20</span></label>
+            <input type="range" id="jumpRange" min="10" max="40" value="20" oninput="updateLabels()">
+        </div>
+
+        <div class="control-group">
+            <label>Spawn Rate <span id="valFreq" class="val-display">4</span></label>
+            <input type="range" id="freqRange" min="1" max="15" value="4" oninput="updateLabels()">
+        </div>
+
+        <div class="control-group">
+            <label>Fall Speed <span id="valSpeed" class="val-display">5</span></label>
+            <input type="range" id="speedRange" min="1" max="20" value="5" oninput="updateLabels()">
+        </div>
+
+        <div class="control-group">
+            <label>Object Lifespan <span id="valLife" class="val-display">Inf</span></label>
+            <input type="range" id="lifeRange" min="1" max="11" value="11" step="1" oninput="updateLabels()">
+            <small style="color:#666; font-size:10px;">Max slider = Infinite</small>
+        </div>
+    </div>
+
+</div>
+
+<script>
+    const canvas = document.getElementById('gameCanvas');
+    const ctx = canvas.getContext('2d');
+    
+    canvas.width = 500;
+    canvas.height = 700;
+
+    // UI Elements
+    const jumpInput = document.getElementById('jumpRange');
+    const freqInput = document.getElementById('freqRange');
+    const speedInput = document.getElementById('speedRange');
+    const lifeInput = document.getElementById('lifeRange'); // 1-10s, 11=Infinite
+
+    function updateLabels() {
+        document.getElementById('valJump').innerText = jumpInput.value;
+        document.getElementById('valFreq').innerText = freqInput.value;
+        document.getElementById('valSpeed').innerText = speedInput.value;
+        const life = parseInt(lifeInput.value);
+        document.getElementById('valLife').innerText = (life > 10) ? "Infinite" : life + "s";
+    }
+    updateLabels();
+
+    // --- Game System ---
+    const PIXELS_PER_METER = 20; // Zoom level (20px = 1m)
+    
+    let gameState = "playing";
+    let timeLeft = 60;
+    let lastTime = Date.now();
+    let gameTime = 0; // Total time elapsed in seconds (for lifespan calc)
+
+    // Camera
+    // 'cameraY' is the absolute world Y coordinate of the BOTTOM of the screen.
+    // So if cameraY = 100, the bottom of the screen is at 100 pixels (5 meters).
+    let cameraY = 0; 
+    let maxRecordMeters = 0;
+
+    // Player
+    const player = {
+        x: canvas.width / 2,
+        y: 0, // Absolute World Y (0 is ground)
+        radius: 15,
+        color: '#00d2ff',
+        vx: 0,
+        vy: 0, // Vertical velocity
+        gravity: -0.6, // Gravity pulls down (negative Y)
+        friction: 0.9
+    };
+
+    // Entities
+    // We now store absolute world coordinates for targets
+    let targets = []; 
+    let particles = [];
+    
+    // Inputs
+    const keys = { ArrowUp: false, ArrowLeft: false, ArrowRight: false };
+    window.addEventListener('keydown', e => { if(keys.hasOwnProperty(e.code)) keys[e.code] = true; });
+    window.addEventListener('keyup', e => { if(keys.hasOwnProperty(e.code)) keys[e.code] = false; });
+
+    function resetGame() {
+        player.x = canvas.width / 2;
+        player.y = player.radius; // Standing on ground
+        player.vx = 0;
+        player.vy = 0;
+        
+        targets = [];
+        particles = [];
+        cameraY = 0;
+        maxRecordMeters = 0;
+        
+        timeLeft = 60;
+        gameTime = 0;
+        gameState = "playing";
+        document.getElementById('gameOverScreen').style.display = 'none';
+        lastTime = Date.now();
+        requestAnimationFrame(gameLoop);
+    }
+
+    function spawnTarget() {
+        const chance = freqInput.value / 100; 
+        if (Math.random() < chance) {
+            // Spawn above the top of the current camera view
+            // Screen Top in World Coords = cameraY + canvas.height
+            const spawnY = cameraY + canvas.height + 50; 
+            
+            targets.push({
+                x: Math.random() * (canvas.width - 40) + 20,
+                y: spawnY, 
+                size: 20,
+                baseSpeed: Math.random() * 2 + 1, // Fall speed
+                spawnTime: gameTime // Record when it was born
+            });
+        }
+    }
+
+    function createExplosion(x, y) {
+        // x, y are screen coordinates for particles
+        for (let i = 0; i < 20; i++) {
+            particles.push({
+                x: x, y: y,
+                vx: (Math.random() - 0.5) * 15,
+                vy: (Math.random() - 0.5) * 15,
+                life: 1.0,
+                color: `hsl(${Math.random()*40 + 10}, 100%, 50%)`
+            });
+        }
+    }
+
+    function update() {
+        if (gameState !== "playing") return;
+
+        // 1. Time Management
+        const now = Date.now();
+        const dt = (now - lastTime) / 1000; // Delta time in seconds
+        if (dt >= 1.0) { // Update timer every second
+            timeLeft--;
+            gameTime++; 
+            lastTime = now;
+            document.getElementById('timeDisplay').innerText = timeLeft;
+            
+            if (timeLeft <= 0) {
+                gameState = "gameover";
+                const currentMeters = Math.floor(player.y / PIXELS_PER_METER);
+                document.getElementById('finalScore').innerText = currentMeters;
+                document.getElementById('finalMax').innerText = Math.floor(maxRecordMeters);
+                document.getElementById('gameOverScreen').style.display = 'block';
+            }
+        }
+
+        // 2. Player Physics (World Coordinates)
+        if (keys.ArrowLeft) player.vx -= 1;
+        if (keys.ArrowRight) player.vx += 1;
+        player.vx *= player.friction;
+        player.x += player.vx;
+
+        // Wall collisions
+        if (player.x < player.radius) { player.x = player.radius; player.vx *= -0.5; }
+        if (player.x > canvas.width - player.radius) { player.x = canvas.width - player.radius; player.vx *= -0.5; }
+
+        // Jump
+        // Check if player is on ground (y <= radius)
+        if (player.y <= player.radius + 1) {
+            player.y = player.radius;
+            player.vy = 0;
+            if (keys.ArrowUp) {
+                player.vy = parseInt(jumpInput.value); // Positive Y is up in World Space
+            }
+        } else {
+            // Apply Gravity
+            player.vy += player.gravity;
+        }
+
+        player.y += player.vy;
+
+        // 3. Camera Logic (Follow Player)
+        // We want the player to stay roughly in the middle-ish vertical area
+        // Target Camera Bottom = PlayerY - (CanvasHeight * 0.3)
+        // Smoothly interpolate towards it
+        let targetCameraY = player.y - (canvas.height * 0.3);
+        
+        // Don't let camera go below ground (0)
+        if (targetCameraY < 0) targetCameraY = 0;
+        
+        // Simple easing for smooth camera
+        cameraY += (targetCameraY - cameraY) * 0.1;
+
+        // Update High Score
+        const currentMeters = player.y / PIXELS_PER_METER;
+        if (currentMeters > maxRecordMeters) maxRecordMeters = currentMeters;
+        
+        document.getElementById('scoreDisplay').innerText = Math.floor(currentMeters);
+        document.getElementById('maxDisplay').innerText = Math.floor(maxRecordMeters);
+
+
+        // 4. Targets Logic
+        spawnTarget();
+        
+        const speedMult = parseInt(speedInput.value) / 3;
+        const lifeSetting = parseInt(lifeInput.value);
+        const isInfinite = lifeSetting > 10;
+
+        for (let i = targets.length - 1; i >= 0; i--) {
+            let t = targets[i];
+            
+            // Move object DOWN in world space
+            t.y -= (t.baseSpeed * speedMult);
+
+            // Calculate Screen Position for collision check
+            // Screen Y = CanvasHeight - (WorldY - CameraY)
+            let screenY = canvas.height - (t.y - cameraY);
+            let screenX = t.x;
+            
+            // Player Screen Position
+            let playerScreenY = canvas.height - (player.y - cameraY);
+
+            // Collision
+            let dx = player.x - screenX;
+            let dy = playerScreenY - screenY;
+            let dist = Math.sqrt(dx*dx + dy*dy);
+
+            if (dist < player.radius + t.size) {
+                createExplosion(screenX, screenY);
+                // Boost
+                player.vy = parseInt(jumpInput.value) * 1.5; 
+                targets.splice(i, 1);
+                continue;
+            }
+
+            // LIFESPAN LOGIC
+            // 1. Check Floor Collision (Ground Zero)
+            if (t.y <= 0) {
+                targets.splice(i, 1); // Remove when hitting ground
+                continue;
+            }
+
+            // 2. Check Time Lifespan (if not infinite)
+            if (!isInfinite) {
+                let age = gameTime - t.spawnTime;
+                // If age exceeds slider setting, remove
+                // (Note: gameTime updates every second, for smoother fade we could use Date.now())
+                // Use Date.now equivalent for smoother check:
+                let realAge = (Date.now() - (lastTime - (gameTime % 1)*1000) - (t.spawnTime * 1000 + (t.spawnMsOffset || 0))) / 1000; 
+                // Simplified: just check generic age
+                 if ((gameTime - t.spawnTime) > lifeSetting) {
+                    targets.splice(i, 1);
+                }
+            }
+        }
+
+        // 5. Particles (Visual only, Screen Space)
+        for (let i = particles.length - 1; i >= 0; i--) {
+            let p = particles[i];
+            p.x += p.vx;
+            p.y += p.vy; // Particles are in screen space, but technically should move with camera? 
+            // For simplicity, let's keep them attached to where they exploded visually, 
+            // but add camera offset difference so they don't get "stuck" on screen.
+            // (Skipped for complexity, simple screen space physics is fine for short explosions)
+            
+            p.life -= 0.05;
+            if (p.life <= 0) particles.splice(i, 1);
+        }
+    }
+
+    function draw() {
+        // Clear
+        ctx.fillStyle = '#1e1e1e';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+        // --- GRID & SCALE ---
+        ctx.strokeStyle = '#333';
+        ctx.fillStyle = '#666';
+        ctx.font = '12px Arial';
+        ctx.lineWidth = 1;
+
+        // Determine visible World Y range
+        let worldBottom = cameraY;
+        let worldTop = cameraY + canvas.height;
+
+        let startMeter = Math.floor(worldBottom / PIXELS_PER_METER);
+        let endMeter = Math.ceil(worldTop / PIXELS_PER_METER);
+
+        for (let m = startMeter; m <= endMeter; m++) {
+            let worldY = m * PIXELS_PER_METER;
+            let screenY = canvas.height - (worldY - cameraY);
+            
+            // Grid Line
+            ctx.beginPath();
+            ctx.moveTo(0, screenY);
+            ctx.lineTo(canvas.width, screenY);
+            ctx.stroke();
+
+            // Text
+            if (m % 5 === 0) {
+                ctx.fillText(m + "m", 5, screenY - 2);
+                ctx.beginPath();
+                ctx.strokeStyle = '#555'; // Darker line for 5m
+                ctx.moveTo(0, screenY);
+                ctx.lineTo(canvas.width, screenY);
+                ctx.stroke();
+                ctx.strokeStyle = '#333';
+            }
+        }
+
+        // Draw Ground Line
+        let groundScreenY = canvas.height - (0 - cameraY);
+        if (groundScreenY < canvas.height) {
+            ctx.fillStyle = '#444';
+            ctx.fillRect(0, groundScreenY, canvas.width, canvas.height - groundScreenY);
+            ctx.strokeStyle = '#00d2ff';
+            ctx.lineWidth = 3;
+            ctx.beginPath();
+            ctx.moveTo(0, groundScreenY);
+            ctx.lineTo(canvas.width, groundScreenY);
+            ctx.stroke();
+        }
+
+        // --- ENTITIES ---
+
+        // Player
+        let playerScreenY = canvas.height - (player.y - cameraY);
+        ctx.beginPath();
+        ctx.arc(player.x, playerScreenY, player.radius, 0, Math.PI * 2);
+        ctx.fillStyle = player.color;
+        ctx.fill();
+
+        // Targets
+        const lifeSetting = parseInt(lifeInput.value);
+        
+        targets.forEach(t => {
+            // Check visibility for optimization (optional, but good practice)
+            // But we draw them if they are within screen range
+            let screenY = canvas.height - (t.y - cameraY);
+            
+            // Only draw if on screen (but they exist in logic regardless!)
+            if (screenY > -50 && screenY < canvas.height + 50) {
+                
+                // Alpha calculation for fading out
+                let alpha = 1.0;
+                if (lifeSetting <= 10) {
+                    let age = gameTime - t.spawnTime;
+                    let remaining = lifeSetting - age;
+                    if (remaining < 2) alpha = remaining / 2; // Fade out last 2 seconds
+                    if (alpha < 0) alpha = 0;
+                }
+
+                ctx.fillStyle = `rgba(255, 71, 87, ${alpha})`;
+                ctx.fillRect(t.x - t.size/2, screenY - t.size/2, t.size, t.size);
+                
+                // Border
+                ctx.strokeStyle = `rgba(255, 255, 255, ${alpha})`;
+                ctx.strokeRect(t.x - t.size/2, screenY - t.size/2, t.size, t.size);
+            }
+        });
+
+        // Particles
+        particles.forEach(p => {
+            ctx.globalAlpha = p.life;
+            ctx.fillStyle = p.color;
+            ctx.beginPath();
+            ctx.arc(p.x, p.y, 4, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.globalAlpha = 1.0;
+        });
+    }
+
+    function gameLoop() {
+        update();
+        draw();
+        requestAnimationFrame(gameLoop);
+    }
+
+    resetGame();
+
+</script>
+</body>
+</html>

@@ -1,0 +1,508 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>High Jumper: Stable Physics</title>
+    <style>
+        body {
+            margin: 0;
+            overflow: hidden;
+            background-color: #121212;
+            color: white;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+        }
+        
+        #gameContainer {
+            position: relative;
+            display: flex;
+            gap: 20px;
+        }
+
+        canvas {
+            background-color: #1e1e1e;
+            border: 2px solid #444;
+            box-shadow: 0 0 30px rgba(0,0,0,0.6);
+            display: block;
+        }
+
+        /* UI Overlays */
+        #hud {
+            position: absolute;
+            top: 20px;
+            right: 20px;
+            pointer-events: none;
+            text-align: right;
+            text-shadow: 1px 1px 2px black;
+        }
+
+        #gameOverScreen {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            background: rgba(0, 0, 0, 0.95);
+            padding: 40px;
+            text-align: center;
+            border-radius: 10px;
+            border: 1px solid #00d2ff;
+            box-shadow: 0 0 20px rgba(0, 210, 255, 0.2);
+            display: none;
+            z-index: 10;
+        }
+
+        /* Controls Panel */
+        #controls {
+            background: #2a2a2a;
+            padding: 20px;
+            border-radius: 8px;
+            width: 250px;
+            border: 1px solid #444;
+            display: flex;
+            flex-direction: column;
+            gap: 15px;
+            height: fit-content;
+        }
+
+        .control-group {
+            display: flex;
+            flex-direction: column;
+            gap: 5px;
+        }
+
+        label { font-size: 14px; color: #ccc; display: flex; justify-content: space-between; }
+        span.val-display { color: #00d2ff; font-weight: bold; }
+        
+        input[type=range] {
+            width: 100%;
+            cursor: pointer;
+            accent-color: #00d2ff;
+        }
+
+        button {
+            padding: 10px 20px;
+            font-size: 18px;
+            cursor: pointer;
+            background: #00d2ff;
+            color: #121212;
+            font-weight: bold;
+            border: none;
+            border-radius: 5px;
+            margin-top: 10px;
+            transition: background 0.2s;
+        }
+        button:hover { background: #33e0ff; }
+    </style>
+</head>
+<body>
+
+<div id="gameContainer">
+    
+    <div style="position: relative;">
+        <div id="hud">
+            <h1><span id="scoreDisplay">0</span> m</h1>
+            <p style="font-size: 0.8em; color: #aaa;">Record: <span id="maxDisplay">0</span> m</p>
+            <h2><span id="timeDisplay">60</span> s</h2>
+        </div>
+
+        <div id="gameOverScreen">
+            <h1 id="finalMessage">Time's Up!</h1>
+            <p>You reached: <span id="finalScore">0</span> m</p>
+            <p style="font-size: 0.8em;">Best was: <span id="finalMax">0</span> m</p>
+            <button onclick="resetGame()">Play Again</button>
+        </div>
+
+        <canvas id="gameCanvas"></canvas>
+    </div>
+
+    <div id="controls">
+        <h3>Settings</h3>
+        
+        <div class="control-group">
+            <label>Jump Power <span id="valJump" class="val-display">800</span></label>
+            <input type="range" id="jumpRange" min="500" max="1500" value="900" oninput="updateLabels()">
+        </div>
+
+        <div class="control-group">
+            <label>Spawn Rate <span id="valFreq" class="val-display">4</span></label>
+            <input type="range" id="freqRange" min="1" max="20" value="5" oninput="updateLabels()">
+        </div>
+
+        <div class="control-group">
+            <label>Fall Speed <span id="valSpeed" class="val-display">200</span></label>
+            <input type="range" id="speedRange" min="50" max="500" value="200" oninput="updateLabels()">
+        </div>
+
+        <div class="control-group">
+            <label>Object Lifespan <span id="valLife" class="val-display">Inf</span></label>
+            <input type="range" id="lifeRange" min="1" max="11" value="11" step="1" oninput="updateLabels()">
+            <small style="color:#666; font-size:10px;">Max slider = Infinite</small>
+        </div>
+    </div>
+
+</div>
+
+<script>
+    const canvas = document.getElementById('gameCanvas');
+    const ctx = canvas.getContext('2d');
+    
+    canvas.width = 500;
+    canvas.height = 700;
+
+    // UI Elements
+    const jumpInput = document.getElementById('jumpRange');
+    const freqInput = document.getElementById('freqRange');
+    const speedInput = document.getElementById('speedRange');
+    const lifeInput = document.getElementById('lifeRange'); 
+
+    function updateLabels() {
+        document.getElementById('valJump').innerText = jumpInput.value;
+        document.getElementById('valFreq').innerText = freqInput.value;
+        document.getElementById('valSpeed').innerText = speedInput.value;
+        const life = parseInt(lifeInput.value);
+        document.getElementById('valLife').innerText = (life > 10) ? "Infinite" : life + "s";
+    }
+    updateLabels();
+
+    // --- Physics Constants ---
+    // We now use pixels per second (PPS) instead of pixels per frame
+    const PIXELS_PER_METER = 20; 
+    const GRAVITY = -2000; // Downward force (px/s^2)
+    const DRAG_X = 5.0; // Air resistance for left/right
+
+    // Game State
+    let gameState = "playing";
+    let timeLeft = 60;
+    let cameraY = 0; // Absolute Y of screen bottom
+    let maxRecordMeters = 0;
+
+    // Timing
+    let lastTime = performance.now();
+    let accumulator = 0; // For physics stability
+
+    // Player
+    const player = {
+        x: canvas.width / 2,
+        y: 15, // Absolute Y (starts on ground)
+        radius: 15,
+        color: '#00d2ff',
+        vx: 0,
+        vy: 0,
+        grounded: true
+    };
+
+    let targets = [];
+    let particles = [];
+    const keys = { ArrowUp: false, ArrowLeft: false, ArrowRight: false };
+
+    window.addEventListener('keydown', e => { if(keys.hasOwnProperty(e.code)) keys[e.code] = true; });
+    window.addEventListener('keyup', e => { if(keys.hasOwnProperty(e.code)) keys[e.code] = false; });
+
+    function resetGame() {
+        player.x = canvas.width / 2;
+        player.y = player.radius;
+        player.vx = 0;
+        player.vy = 0;
+        player.grounded = true;
+        
+        targets = [];
+        particles = [];
+        cameraY = 0;
+        maxRecordMeters = 0;
+        timeLeft = 60;
+        
+        gameState = "playing";
+        document.getElementById('gameOverScreen').style.display = 'none';
+        lastTime = performance.now();
+        requestAnimationFrame(gameLoop);
+    }
+
+    function spawnTarget(dt) {
+        // Normalize spawn rate to seconds
+        // Slider 1-20. roughly 1 = 0.5 per sec, 20 = 10 per sec
+        const spawnChancePerSecond = parseInt(freqInput.value) * 0.5;
+        
+        // Poisson process simulation: probability P = 1 - e^(-rate * dt)
+        if (Math.random() < 1 - Math.exp(-spawnChancePerSecond * dt)) {
+            // Spawn above current view
+            const spawnY = cameraY + canvas.height + 50;
+            
+            targets.push({
+                x: Math.random() * (canvas.width - 40) + 20,
+                y: spawnY, 
+                size: 20,
+                speedMultiplier: Math.random() * 0.5 + 0.8, // Variance
+                age: 0,
+                maxLife: parseInt(lifeInput.value) // Snapshot setting at birth
+            });
+        }
+    }
+
+    function createExplosion(x, y) {
+        // x,y in world coords
+        for (let i = 0; i < 20; i++) {
+            particles.push({
+                x: x, y: y,
+                vx: (Math.random() - 0.5) * 400,
+                vy: (Math.random() - 0.5) * 400,
+                life: 1.0,
+                color: `hsl(${Math.random()*40 + 10}, 100%, 50%)`
+            });
+        }
+    }
+
+    function update(dt) {
+        if (gameState !== "playing") return;
+
+        // --- Timer ---
+        // Decrease strictly by dt (real seconds)
+        timeLeft -= dt;
+        document.getElementById('timeDisplay').innerText = Math.ceil(timeLeft);
+        
+        if (timeLeft <= 0) {
+            gameState = "gameover";
+            document.getElementById('finalScore').innerText = Math.floor(player.y / PIXELS_PER_METER);
+            document.getElementById('finalMax').innerText = Math.floor(maxRecordMeters);
+            document.getElementById('gameOverScreen').style.display = 'block';
+            return;
+        }
+
+        // --- Player Physics ---
+        // Horizontal
+        if (keys.ArrowLeft) player.vx -= 1500 * dt; // Acceleration
+        if (keys.ArrowRight) player.vx += 1500 * dt;
+        
+        // Drag (Friction)
+        player.vx -= player.vx * DRAG_X * dt;
+        player.x += player.vx * dt;
+
+        // Boundaries
+        if (player.x < player.radius) { player.x = player.radius; player.vx *= -0.5; }
+        if (player.x > canvas.width - player.radius) { player.x = canvas.width - player.radius; player.vx *= -0.5; }
+
+        // Vertical
+        const jumpForce = parseInt(jumpInput.value);
+        
+        // Ground Check
+        if (player.y <= player.radius + 1) {
+            player.y = player.radius;
+            player.vy = 0;
+            player.grounded = true;
+            if (keys.ArrowUp) {
+                player.vy = jumpForce;
+                player.grounded = false;
+            }
+        } else {
+            player.grounded = false;
+            player.vy += GRAVITY * dt;
+        }
+
+        player.y += player.vy * dt;
+
+        // --- Camera Logic (The Fix) ---
+        // 1. Smooth Follow
+        let targetCameraY = player.y - (canvas.height * 0.4);
+        if (targetCameraY < 0) targetCameraY = 0;
+        cameraY += (targetCameraY - cameraY) * 5 * dt; // Interpolate
+
+        // 2. Hard Constraints (Bounds Check)
+        // Player Screen Y = canvas.height - (player.y - cameraY)
+        // We want player screen Y to be between padding and canvas.height - padding
+        const padding = 50;
+        
+        // Check Top Bound (Player flying too high for camera)
+        let playerScreenY = canvas.height - (player.y - cameraY);
+        if (playerScreenY < padding) {
+            // Shift camera UP immediately
+            cameraY = player.y - (canvas.height - padding);
+        }
+        
+        // Check Bottom Bound (Player falling too fast for camera)
+        if (playerScreenY > canvas.height - padding) {
+            // Shift camera DOWN immediately
+            // But don't go below ground 0
+            let newCamY = player.y - padding;
+            if (newCamY < 0) newCamY = 0;
+            cameraY = newCamY;
+        }
+        
+        // Ensure Camera never goes below ground
+        if (cameraY < 0) cameraY = 0;
+
+
+        // --- Targets ---
+        spawnTarget(dt);
+        const baseFallSpeed = parseInt(speedInput.value);
+        const currentLifeSetting = parseInt(lifeInput.value);
+        const isInfinite = currentLifeSetting > 10;
+
+        for (let i = targets.length - 1; i >= 0; i--) {
+            let t = targets[i];
+            
+            // Move
+            t.y -= (baseFallSpeed * t.speedMultiplier) * dt;
+            t.age += dt;
+
+            // Collision
+            // Simple distance check (circle vs circle approx)
+            let dx = player.x - t.x;
+            let dy = player.y - t.y;
+            let distSq = dx*dx + dy*dy;
+            let radii = player.radius + t.size/2;
+
+            if (distSq < radii*radii) {
+                createExplosion(t.x, t.y);
+                player.vy = jumpForce * 1.5; // Boost
+                targets.splice(i, 1);
+                continue;
+            }
+
+            // Cleanup: Ground Hit
+            if (t.y <= 0) {
+                targets.splice(i, 1);
+                continue;
+            }
+
+            // Cleanup: Lifespan
+            if (!isInfinite) {
+                // If setting was changed mid-game, we use the current setting, 
+                // or you could use t.maxLife to respect the setting at spawn time.
+                // Using current setting feels more responsive to slider tweaks.
+                if (t.age > currentLifeSetting) {
+                    targets.splice(i, 1);
+                }
+            }
+        }
+
+        // --- Particles ---
+        for (let i = particles.length - 1; i >= 0; i--) {
+            let p = particles[i];
+            p.x += p.vx * dt;
+            p.y += p.vy * dt;
+            p.life -= 1.5 * dt; // Fade out speed
+            if (p.life <= 0) particles.splice(i, 1);
+        }
+
+        // Stats
+        if (player.y / PIXELS_PER_METER > maxRecordMeters) {
+            maxRecordMeters = player.y / PIXELS_PER_METER;
+        }
+        document.getElementById('scoreDisplay').innerText = Math.floor(player.y / PIXELS_PER_METER);
+        document.getElementById('maxDisplay').innerText = Math.floor(maxRecordMeters);
+    }
+
+    function draw() {
+        // Clear
+        ctx.fillStyle = '#1e1e1e';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+        // --- Grid ---
+        ctx.strokeStyle = '#333';
+        ctx.fillStyle = '#666';
+        ctx.font = '12px Arial';
+        ctx.lineWidth = 1;
+
+        let startMeter = Math.floor(cameraY / PIXELS_PER_METER);
+        let endMeter = Math.ceil((cameraY + canvas.height) / PIXELS_PER_METER);
+
+        for (let m = startMeter; m <= endMeter; m++) {
+            let worldY = m * PIXELS_PER_METER;
+            let screenY = canvas.height - (worldY - cameraY);
+            
+            ctx.beginPath();
+            ctx.moveTo(0, screenY);
+            ctx.lineTo(canvas.width, screenY);
+            ctx.stroke();
+
+            if (m % 5 === 0) {
+                ctx.fillText(m + "m", 5, screenY - 2);
+                ctx.strokeStyle = '#555';
+                ctx.beginPath();
+                ctx.moveTo(0, screenY);
+                ctx.lineTo(canvas.width, screenY);
+                ctx.stroke();
+                ctx.strokeStyle = '#333';
+            }
+        }
+
+        // Ground
+        let groundScreenY = canvas.height - (0 - cameraY);
+        if (groundScreenY < canvas.height) {
+            ctx.fillStyle = '#444';
+            ctx.fillRect(0, groundScreenY, canvas.width, canvas.height - groundScreenY);
+            ctx.strokeStyle = '#00d2ff';
+            ctx.beginPath();
+            ctx.moveTo(0, groundScreenY);
+            ctx.lineTo(canvas.width, groundScreenY);
+            ctx.stroke();
+        }
+
+        // --- Objects ---
+        
+        // Targets
+        const currentLife = parseInt(lifeInput.value);
+        targets.forEach(t => {
+            let screenY = canvas.height - (t.y - cameraY);
+            
+            // Visibility Check
+            if (screenY > -50 && screenY < canvas.height + 50) {
+                let alpha = 1.0;
+                // Fade logic
+                if (currentLife <= 10) {
+                    let remaining = currentLife - t.age;
+                    if (remaining < 1.0) alpha = remaining;
+                    if (alpha < 0) alpha = 0;
+                }
+                
+                ctx.fillStyle = `rgba(255, 71, 87, ${alpha})`;
+                ctx.fillRect(t.x - t.size/2, screenY - t.size/2, t.size, t.size);
+                ctx.strokeStyle = `rgba(255, 255, 255, ${alpha})`;
+                ctx.strokeRect(t.x - t.size/2, screenY - t.size/2, t.size, t.size);
+            }
+        });
+
+        // Player
+        let playerScreenY = canvas.height - (player.y - cameraY);
+        ctx.beginPath();
+        ctx.arc(player.x, playerScreenY, player.radius, 0, Math.PI * 2);
+        ctx.fillStyle = player.color;
+        ctx.fill();
+        // Shine
+        ctx.fillStyle = 'rgba(255,255,255,0.3)';
+        ctx.beginPath();
+        ctx.arc(player.x - 5, playerScreenY - 5, 5, 0, Math.PI*2);
+        ctx.fill();
+
+        // Particles (World Space -> Screen Space)
+        particles.forEach(p => {
+            let pScreenY = canvas.height - (p.y - cameraY);
+            ctx.globalAlpha = p.life;
+            ctx.fillStyle = p.color;
+            ctx.beginPath();
+            ctx.arc(p.x, pScreenY, 4, 0, Math.PI * 2); // X is absolute in particle logic
+            ctx.fill();
+            ctx.globalAlpha = 1.0;
+        });
+    }
+
+    function gameLoop(timestamp) {
+        // Calculate Delta Time (dt) in seconds
+        let dt = (timestamp - lastTime) / 1000;
+        lastTime = timestamp;
+
+        // Cap dt to prevent huge jumps if tab is inactive
+        if (dt > 0.1) dt = 0.1;
+
+        update(dt);
+        draw();
+        requestAnimationFrame(gameLoop);
+    }
+
+    resetGame();
+
+</script>
+</body>
+</html>
